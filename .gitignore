@@ -65,8 +65,13 @@ reports/
 *.log
 logs/
 
-web/uploads/
-cache/
-.roo/
+*.png
+!docs/sponsor/*.png
+*.log
 CLAUDE.md
 GEMINI.md
+.pre-commit-config.yaml
+data/*.h5
+data/.keys_cache
+strategies/*/optimization/results
+

@@ -1,315 +1,329 @@
-# 📈 SimTradeLab 深测Lab
+# 📈 SimTradeLab
 
-<div align="center">
+**轻量级量化回测框架 - PTrade API本地实现**
 
-**开源策略回测框架**
+[![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)](https://www.python.org/)
+[![License](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
+[![License: Commercial](https://img.shields.io/badge/License-Commercial--Available-red)](licenses/LICENSE-COMMERCIAL.md)
+[![Version](https://img.shields.io/badge/Version-2.0.0-orange.svg)](#)
+[![PyPI](https://img.shields.io/pypi/v/simtradelab.svg)](https://pypi.org/project/simtradelab/)
+[![PyPI - Downloads](https://img.shields.io/pypi/dm/simtradelab.svg)](https://pypi.org/project/simtradelab/)
 
-[![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-Passing-brightgreen.svg)](#测试)
-[![Version](https://img.shields.io/badge/Version-1.0.0-orange.svg)](#版本历程)
+*完整模拟PTrade平台API，策略可无缝迁移*
 
-*灵感来自PTrade的事件驱动模型，提供轻量、清晰、可插拔的策略验证环境*
-
-</div>
+---
 
 ## 🎯 项目简介
 
 SimTradeLab（深测Lab） 是一个由社区独立开发的开源策略回测框架，灵感来源于 PTrade 的事件驱动架构。它具备完全自主的实现与出色的扩展能力，为策略开发者提供一个轻量级、结构清晰、模块可插拔的策略验证环境。框架无需依赖 PTrade 即可独立运行，但与其语法保持高度兼容。所有在 SimTradeLab 中编写的策略可无缝迁移至 PTrade 平台，反之亦然，两者之间的 API 可直接互通使用。详情参考：https://github.com/kay-ou/ptradeAPI 项目。
 
-> SimTradeLab项目**QQ群1051628635**，本群仅限技术交流，如需了解支持 Ptrade/QMT 等接口的券商及其官方业务流程，请通过私信联系或访问券商官网获取官方信息。
+**核心特性：**
+- ✅ **52个核心API** - 股票交易、数据查询、技术指标完整支持（34% PTrade API完成度）
+- ⚡ **20-30倍性能提升** - 本地回测比PTrade平台快20-30倍
+- 🚀 **数据常驻内存** - 单例模式，首次加载后常驻，二次运行秒级启动
+- 💾 **多级智能缓存** - LRU缓存（MA/VWAP/复权/历史数据），命中率>95%
+- 🧠 **智能数据加载** - AST静态分析策略代码，按需加载数据，节省内存
+- 🔧 **生命周期控制** - 7个生命周期阶段，严格模拟PTrade的API调用限制
+- 📊 **完整统计报告** - 收益、风险、交易明细、持仓批次、FIFO分红税
+- 🔌 **模块化设计** - 清晰的代码结构，易于扩展和定制
 
-### ✨ 核心特性
+**当前版本：** v2.0.0 | **开发状态：** Beta - 核心功能完善，正在策略实战中持续优化
 
-- 🔧 **事件驱动引擎**: 完整的回测引擎实现
-- 🌐 **现代Web界面**: 可视化策略编辑、回测监控和结果分析
-- 🐳 **Docker支持**: 一键容器化部署，支持集群扩展
-- 📊 **多格式报告**: TXT、JSON、CSV、摘要等格式
-- 🌐 **真实数据源**: 支持AkShare、Tushare等主流数据源
-- ⚡ **智能CLI**: 集成的 `simtradelab` 命令行工具
-- ✅ **PTrade兼容**: 保持与PTrade语法习惯的兼容性
+---
 
 ## 🚀 快速开始
 
-### 📦 方式一：pip安装（推荐）
+### 📦 安装
 
-#### Linux/macOS 安装
 ```bash
-# 直接安装
+# 创建虚拟环境
+python -m venv venv
+source venv/bin/activate   # Linux/Mac
+venv\Scripts\activate      # Windows
+
+# 安装最新版本
 pip install simtradelab
 
-# 包含数据源支持
-pip install simtradelab[data]
-
-# 开发环境安装
-pip install simtradelab[dev]
+# 包含优化器（可选）
+pip install simtradelab[optimizer]
 ```
 
-#### Windows 安装
-```bash
-# 方法1：使用预编译包（推荐）
-pip install --only-binary=all numpy pandas matplotlib
-pip install simtradelab
+**系统依赖：**
+- macOS: `brew install hdf5 ta-lib`
+- Linux: `sudo apt-get install libhdf5-dev` + [ta-lib源码编译](docs/INSTALLATION.md)
 
-# 方法2：使用conda环境（推荐）
-conda create -n simtradelab python=3.12
-conda activate simtradelab
-conda install numpy pandas matplotlib pyyaml
-pip install simtradelab
+> 详细安装指南：[docs/INSTALLATION.md](docs/INSTALLATION.md)
 
-# 方法3：如果遇到编译问题
-pip install --no-build-isolation simtradelab
+### 📁 准备数据
+
+将PTrade数据文件放到 `data/` 目录：
+```
+data/
+├── ptrade_data.h5           # 股票价格、除权数据
+└── ptrade_fundamentals.h5   # 基本面数据
 ```
 
-**Windows安装问题？** 运行故障排除脚本：
-```bash
-python -c "import urllib.request; exec(urllib.request.urlopen('https://raw.githubusercontent.com/kay-ou/SimTradeLab/main/scripts/windows_install_troubleshoot.py').read())"
-```
+**数据获取：** 推荐使用 [SimTradeData](https://github.com/kay-ou/SimTradeData) 项目获取A股历史数据
 
-**验证安装成功：**
-```bash
-# 测试导入
-python -c "import simtradelab; print(f'✅ SimTradeLab {simtradelab.__version__} 安装成功!')"
+### ✍️ 编写策略
 
-# 测试CLI工具
-simtradelab --help
-```
+创建策略文件 `strategies/my_strategy/backtest.py`：
 
-### 🌐 方式二：Web界面
-
-```bash
-# 安装依赖
-pip install simtradelab[web]
-
-# 启动Web界面
-python -c "from simtradelab.web import start_server; start_server()"
-```
-
-然后访问 `http://localhost:8000` 享受现代化的Web界面体验！
-
-### 🐳 方式三：Docker部署（生产推荐）
-
-```bash
-# 一键启动
-docker-compose up --build
-
-# 后台运行
-docker-compose up -d --build
-```
-
-访问 `http://localhost:8000` 开始使用！
-
-### ⚡ 方式三：命令行
-
-**基础安装:**
-```bash
-# 克隆项目
-git clone https://github.com/kay-ou/SimTradeLab.git
-cd SimTradeLab
-
-# 安装依赖
-poetry install
-
-# 安装数据源依赖（可选）
-poetry install --with data
-```
-
-### 🎯 5分钟上手
-
-**🌐 Web界面体验（推荐）:**
-1. 启动Web界面：`python start_web.py`
-2. 访问 `http://localhost:8000`
-3. 在策略管理页面创建或编辑策略
-4. 在回测执行页面配置参数并运行
-5. 在结果分析页面查看图表和报告
-
-**⚡ 命令行快速开始:**
-
-**1. 使用CSV数据源**
-```bash
-poetry run simtradelab --strategy strategies/buy_and_hold_strategy.py --data data/sample_data.csv
-```
-
-**2. 使用真实数据源**
-```bash
-poetry run simtradelab --strategy strategies/real_data_strategy.py --data-source akshare --securities 000001.SZ
-```
-
-**3. 程序化使用**
-```python
-from simtradelab import BacktestEngine
-
-engine = BacktestEngine(
-    strategy_file='strategies/buy_and_hold_strategy.py',
-    data_path='data/sample_data.csv',
-    start_date='2023-01-03',
-    end_date='2023-01-05',
-    initial_cash=1000000.0
-)
-files = engine.run()
-```
-
-## 🌐 Web界面特性
-
-### 核心功能模块
-- 📊 **仪表盘**: 系统状态概览和快速操作
-- 📝 **策略管理**: 可视化代码编辑器，支持语法高亮和智能补全
-- 🗄️ **数据管理**: 支持多数据源配置和文件上传
-- ▶️ **回测执行**: 实时监控回测进度和状态
-- 🔄 **批量测试**: 参数优化和批量回测功能
-- 📈 **结果分析**: 交互式图表和性能指标分析
-- 📋 **报告中心**: 多格式报告查看和下载
-
-### 技术亮点
-- **现代化编辑器**: 基于Ace Editor的Python代码编辑器
-- **实时更新**: 支持任务状态实时监控
-- **响应式设计**: 完美适配移动端和桌面端
-- **RESTful API**: 完整的后端API支持
-- **图表可视化**: Chart.js提供丰富的交互式图表
-
-## ⚡ 命令行工具
-
-### 基本用法
-```bash
-# 查看帮助
-simtradelab --help
-
-# CSV数据源
-simtradelab --strategy strategies/test_strategy.py --data data/sample_data.csv
-
-# 真实数据源
-simtradelab --strategy strategies/real_data_strategy.py --data-source akshare --securities 000001.SZ,000002.SZ
-```
-
-### 主要参数
-| 参数 | 说明 | 示例 |
-|------|------|------|
-| `--strategy` | 策略文件路径 | `strategies/test_strategy.py` |
-| `--data` | CSV数据文件 | `data/sample_data.csv` |
-| `--data-source` | 真实数据源 | `akshare`, `tushare` |
-| `--securities` | 股票代码 | `000001.SZ,000002.SZ` |
-| `--start-date` | 开始日期 | `2023-01-01` |
-| `--end-date` | 结束日期 | `2023-12-31` |
-| `--cash` | 初始资金 | `1000000` |
-
-## 🌐 数据源配置
-
-### AkShare（免费）
-```bash
-# 无需配置，直接使用
-simtradelab --strategy strategies/real_data_strategy.py --data-source akshare --securities 000001.SZ
-```
-
-### Tushare（需要token）
-```yaml
-# simtrade_config.yaml
-data_sources:
-  tushare:
-    enabled: true
-    token: "your_tushare_token_here"
-```
-
-## 📊 报告系统
-
-每次运行后自动生成多种格式的报告：
-
-- 📝 **详细文本报告** (`.txt`) - 完整策略分析
-- 📊 **结构化数据** (`.json`) - 程序化分析
-- 📈 **数据表格** (`.csv`) - Excel分析
-- 📋 **智能摘要** (`.summary.txt`) - 快速概览
-
-报告自动按策略分类存储在 `reports/{strategy_name}/` 目录下。
-
-## 🎓 策略开发
-
-### 基本策略结构
 ```python
 def initialize(context):
     """策略初始化"""
-    log.info("策略初始化")
-    g.stock = '000001.SZ'
+    set_benchmark('000300.SS')
+    context.stocks = ['600519.SS', '000858.SZ']
 
 def handle_data(context, data):
-    """每日数据处理"""
-    current_price = data.current(g.stock, 'close')
-    
-    # 买入逻辑
-    if context.portfolio.positions[g.stock].amount == 0:
-        order_target_percent(g.stock, 0.8)
-        log.info(f"买入 {g.stock}")
+    """每日交易逻辑"""
+    for stock in context.stocks:
+        hist = get_history(20, '1d', 'close', [stock], is_dict=True)
+        if stock not in hist:
+            continue
 
-def after_trading_end(context, data):
-    """交易结束后处理"""
-    total_value = context.portfolio.total_value
-    log.info(f"总资产: ¥{total_value:,.2f}")
+        prices = hist[stock]
+        ma5 = sum(prices[-5:]) / 5
+        ma20 = sum(prices[-20:]) / 20
+
+        # 金叉买入
+        if ma5 > ma20 and stock not in context.portfolio.positions:
+            order_value(stock, context.portfolio.portfolio_value * 0.3)
+        # 死叉卖出
+        elif ma5 < ma20 and stock in context.portfolio.positions:
+            order_target(stock, 0)
 ```
 
-### 可用API
-📖 **完整文档**
+**注意：Backtest模式严格模拟PTrade限制**
+- ❌ 不支持f-string（使用 `.format()` 或 `%` 格式化）
+- ❌ 不支持io、sys等模块导入
+- ✅ 启动时自动检查Python 3.5兼容性
 
-- 🎯 [SimTradeLab API 完整参考文档](docs/SIMTRADELAB_API_COMPLETE_REFERENCE.md) - **推荐主文档**
-- 📋 [策略开发指南](docs/STRATEGY_GUIDE.md) 
-- 📊 [数据格式说明](docs/DATA_FORMAT.md)
-- 🔧 [技术指标说明](docs/TECHNICAL_INDICATORS.md)
+### ▶️ 运行回测
 
-## 🧪 测试
-
-```bash
-# 运行所有测试
-poetry run pytest
-
-# 运行特定测试
-poetry run pytest tests/unit/
-
-# 生成覆盖率报告
-poetry run pytest --cov=simtradelab --cov-report=html
-```
-
-## 📦 作为包使用
-
-### 安装
-```bash
-pip install simtradelab
-```
-
-### 使用
 ```python
-from simtradelab import BacktestEngine
-from simtradelab.data_sources import AkshareDataSource
+# run_backtest.py
+from simtradelab.backtest.runner import BacktestRunner
 
-# 创建引擎
-engine = BacktestEngine(
-    strategy_file='my_strategy.py',
-    data_source=AkshareDataSource(),
-    securities=['000001.SZ'],
-    start_date='2023-01-01',
-    end_date='2023-12-31',
-    initial_cash=1000000.0
+runner = BacktestRunner()
+runner.run(
+    strategy_name='my_strategy',
+    start_date='2024-01-01',
+    end_date='2024-12-31',
+    initial_capital=1000000.0
 )
-
-# 运行回测
-files = engine.run()
 ```
 
-## 🤝 贡献
+执行：
+```bash
+poetry run python run_backtest.py
+```
 
-我们欢迎任何形式的社区贡献。请参考我们的 [贡献指南](CONTRIBUTING.md) 了解如何参与项目开发、提交问题和功能请求
+### 📊 查看结果
+
+回测完成后，在策略目录下生成：
+```
+strategies/my_strategy/stats/
+├── backtest_*.log    # 详细日志
+└── backtest_*.png    # 4图可视化（资产曲线/每日盈亏/买卖金额/持仓市值）
+```
+
+---
+
+## 🔬 Research模式（交互式探索）
+
+SimTradeLab提供与PTrade完全兼容的Research模式，支持Jupyter Notebook交互式数据分析。
+
+```python
+# 在Jupyter Notebook中
+from simtradelab.research.api import init_api, get_price, get_history
+
+# 初始化API（按需加载模式）
+api = init_api()
+
+# 获取历史价格
+df = get_price('600519.SS', start_date='2024-01-01', end_date='2024-12-31')
+
+# 获取历史数据
+hist = get_history(20, '1d', 'close', ['600519.SS'])
+
+# 获取指数成分股
+stocks = api.get_index_stocks('000300.SS', date='2024-01-01')
+```
+
+**特点：**
+- ✅ 无生命周期限制 - 所有API可随时调用
+- ✅ 智能按需加载 - 首次访问时自动加载相关数据集
+- ✅ 数据常驻 - 单例模式，多次运行秒级启动
+- ✅ 支持f-string - 不受PTrade语法限制
+
+示例Notebook：`src/simtradelab/research/notebook.ipynb`
+
+---
+
+## 📚 API文档
+
+已实现52个核心API（34% PTrade API完成度），涵盖股票交易、数据查询、技术指标、策略配置等核心功能。
+
+**核心API分类：**
+
+| 类别 | 完成度 | 说明 |
+|------|--------|------|
+| 交易API | ✅ | order, order_target, order_value, order_target_value, cancel_order |
+| 数据查询 | ✅ | get_price, get_history, get_fundamentals, get_stock_info |
+| 板块信息 | ✅ | get_index_stocks, get_industry_stocks, get_stock_blocks |
+| 技术指标 | ✅ | get_MACD, get_KDJ, get_RSI, get_CCI |
+| 策略配置 | ✅ | set_benchmark, set_commission, set_slippage, set_universe |
+| 生命周期 | ✅ | initialize, before_trading_start, handle_data, after_trading_end |
+| 融资融券 | ❌ | 19个API未实现 |
+| 期货/期权 | ❌ | 22个API未实现 |
+
+**完整API列表和实现状态：** [docs/PTrade_API_Implementation_Status.md](docs/PTrade_API_Implementation_Status.md)
+
+---
 
 ## 📄 许可证
 
-本项目采用 MIT 许可证 - 查看 [LICENSE](LICENSE) 文件了解详情。
+本项目采用 **双许可证** 模式：
 
-## ⚖️ 法律免责声明
+### 🆓 开源使用
+- **GNU Affero General Public License v3.0 (AGPL-3.0)** - 查看 [LICENSE](LICENSE) | [中文说明](licenses/LICENSE.zh-CN)
+- ✅ 免费用于开源项目
+- ✅ 个人学习和研究
+- ⚠️ 网络使用需开源（AGPL要求）
 
-SimTradeLab 是一个由社区独立开发的开源策略回测框架，灵感来源于 PTrade 的事件驱动设计理念，但并未包含 PTrade 的源代码、商标或任何受保护内容。该项目不隶属于 PTrade，也未获得其官方授权。SimTradeLab 的所有实现均为自主构建，仅用于教学研究、策略验证和非商业性用途。
+### 💼 商业使用
+- **商业许可证** - 查看 [LICENSE-COMMERCIAL.md](licenses/LICENSE-COMMERCIAL.md) | [中文说明](licenses/LICENSE-COMMERCIAL.zh-CN.md)
+- ✅ 用于商业/闭源产品
+- ✅ 提供技术支持和定制服务
+- 📧 联系: [kayou@duck.com](mailto:kayou@duck.com)
+
+**何时需要商业许可：**
+- 将SimTradeLab集成到商业产品/SaaS服务中
+- 作为内部工具但不希望开源代码
+- 需要技术支持和定制开发
+
+---
+
+## 🏗️ 项目结构
+
+```
+SimTradeLab/
+├── src/simtradelab/
+│   ├── ptrade/          # PTrade API模拟层（52个核心API）
+│   ├── backtest/        # 回测引擎（统计、优化、配置）
+│   ├── research/        # Research模式（无生命周期限制）
+│   ├── service/         # 核心服务（数据常驻）
+│   └── utils/           # 工具模块（路径、性能、兼容检查）
+├── strategies/          # 策略目录
+├── data/               # 数据目录
+└── docs/               # 文档
+    ├── PTrade_API_Implementation_Status.md  # API实现状态
+    ├── ARCHITECTURE.md                       # 架构设计文档
+    ├── INSTALLATION.md                       # 详细安装指南
+    ├── TOOLS.md                              # 工具脚本说明
+    ├── IDE_SETUP.md                          # IDE配置指南
+    └── CONTRIBUTING.md                       # 贡献指南
+```
+
+---
+
+## 🔧 开发指南
+
+### 添加新策略
+1. 在 `strategies/` 创建新目录
+2. 添加 `backtest.py` 文件，实现生命周期函数
+3. 修改 `run_backtest.py` 的 `strategy_name`
+4. 运行回测
+
+### 扩展API
+1. 在 `src/simtradelab/ptrade/api.py` 添加新方法
+2. 在 `src/simtradelab/ptrade/lifecycle_config.py` 配置阶段限制
+3. 更新文档
+
+**详细开发规范：** [docs/DEVELOPMENT_RULES.md](docs/DEVELOPMENT_RULES.md)
+
+---
+
+## 🚧 待改进与已知问题
+
+### 主要限制
+- ❌ 不支持分钟线数据（仅日线）
+- ❌ 不支持实盘交易（仅回测）
+- ⚠️ 测试覆盖不全面（策略驱动测试中）
+- ⏳ 99个PTrade API未实现（融资融券、期货、期权等）
+
+### 计划改进
+- 🔧 命令行工具（目前需要修改Python文件）
+- 🔧 内存优化（支持小内存环境<8GB）
+- 🔧 SimTradeData性能优化（数据获取速度慢）
+
+**详细问题追踪：** [GitHub Issues](https://github.com/kay-ou/SimTradeLab/issues)
+
+---
+
+## 🐛 常见问题
+
+**Q: 如何修改初始资金？**
+```python
+runner.run(initial_capital=2000000.0)  # 修改这里
+```
+
+**Q: 回测太慢怎么办？**
+- 减少股票数量或缩短回测时间
+- 数据常驻已默认启用（二次运行秒级启动）
+
+**Q: 如何查看更多日志？**
+日志文件位于 `strategies/{strategy_name}/stats/*.log`
+
+**Q: 数据从哪里获取？**
+使用 [SimTradeData](https://github.com/kay-ou/SimTradeData) 项目获取A股历史数据
+
+**Q: 数据加载异常或回测结果不正常？**
+可能是缓存问题，尝试清理并重建：
+```bash
+cd data
+rm -rf .keys_cache/ ptrade_adj_pre.h5 ptrade_dividend_cache.h5
+```
+详见 [INSTALLATION.md - Q7](docs/INSTALLATION.md#q7-数据加载异常或缓存问题)
+
+---
+
+## 🤝 贡献指南
+
+我们非常欢迎社区贡献！
+
+**参与方式：**
+- 🐛 [报告问题](https://github.com/kay-ou/SimTradeLab/issues)
+- 💻 实现缺失的API功能
+- 🔧 修复Bug和性能优化
+- 📚 完善文档和示例
+- 💡 分享策略和使用反馈
+
+**贡献者许可协议（CLA）：**
+- 您拥有提交代码的完整版权
+- 您同意按照 AGPL-3.0 许可证发布
+- 您同意项目维护者有权用于商业许可授权
+
+**详细贡献指南：** [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md)
+
+---
+
+## ⚖️ 免责声明
+
+SimTradeLab 是一个由社区独立开发的开源策略回测框架，灵感来源于 PTrade 的事件驱动设计理念，但并未包含 PTrade 的源代码、商标或任何受保护内容。该项目不隶属于 PTrade，也未获得其官方授权。
 
 使用本框架构建或测试策略的用户应自行确保符合所在地区的法律法规、交易平台的使用条款及数据源的合规性。项目开发者不对任何由使用本项目所引发的直接或间接损失承担责任。
 
+---
+
 ## 🙏 致谢
 
-- 感谢 PTrade 提供的设计灵感
-- 感谢 AkShare 和 Tushare 提供的数据源支持
-- 感谢所有贡献者和用户的支持
+- 感谢PTrade提供的API设计灵感
+- 感谢所有贡献者和用户反馈
+- 感谢在实际策略开发中帮助发现和修复Bug的用户
+
+**特别说明：** SimTradeLab是社区驱动的开源项目，我们在实际策略开发中不断完善功能。由于时间和资源有限，测试覆盖还不够全面，欢迎社区参与，共同发现和解决问题。
 
 ---
 
@@ -317,20 +331,16 @@ SimTradeLab 是一个由社区独立开发的开源策略回测框架，灵感�
 
 **⭐ 如果这个项目对您有帮助，请给我们一个星标！**
 
-[📖 文档](docs/) | [🌐 Web部署指南](WEB_DOCKER_GUIDE.md) | [🐛 报告问题](https://github.com/kay-ou/SimTradeLab/issues) | [💡 功能请求](https://github.com/kay-ou/SimTradeLab/issues)
-
-</div>
+[🐛 报告问题](https://github.com/kay-ou/SimTradeLab/issues) | [💡 功能请求](https://github.com/kay-ou/SimTradeLab/issues) | [📚 完整文档](docs/)
 
 ---
-
-<div align="center">
 
 ## 💖 赞助支持
 
 如果这个项目对您有帮助，欢迎赞助支持开发！
 
-<img src="https://github.com/kay-ou/SimTradeLab/blob/main/sponsor/WechatPay.png?raw=true" alt="微信赞助" width="200">
-<img src="https://github.com/kay-ou/SimTradeLab/blob/main/sponsor/AliPay.png?raw=true" alt="支付宝赞助" width="200">
+<img src="docs/sponsor/WechatPay.png?raw=true" alt="微信赞助" width="200">
+<img src="docs/sponsor/AliPay.png?raw=true" alt="支付宝赞助" width="200">
 
 **您的支持是我们持续改进的动力！**
 
