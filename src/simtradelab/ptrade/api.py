@@ -72,6 +72,9 @@ class PtradeAPI:
         # 股票池管理
         self.active_universe: set = set()
 
+        # 订单处理器（延迟初始化）
+        self._order_processor: Optional[OrderProcessor] = None
+
         # 缓存 - 使用统一缓存管理器
         self._stock_status_cache: dict[tuple, bool] = {}
         self._stock_date_index: dict[str, tuple[dict, list]] = {}
@@ -79,6 +82,16 @@ class PtradeAPI:
         self._sorted_status_dates: Optional[list[str]] = None
         self._history_cache: dict = cache_manager.get_namespace('history')._cache  # 使用LRUCache
         self._fundamentals_cache: dict = cache_manager.get_namespace('fundamentals')._cache  # 使用全局缓存
+
+    @property
+    def order_processor(self) -> OrderProcessor:
+        """获取订单处理器（延迟初始化）"""
+        if self._order_processor is None:
+            self._order_processor = OrderProcessor(
+                self.context, self.data_context,
+                self.get_stock_date_index, self.log
+            )
+        return self._order_processor
 
     def prebuild_date_index(self, stocks: Optional[list[str]] = None) -> None:
         """预构建股票日期索引（显著提升性能）"""
@@ -97,7 +110,7 @@ class PtradeAPI:
                     date_dict = {date: idx for idx, date in enumerate(stock_df.index)}
                     sorted_dates = list(stock_df.index)
                     self._stock_date_index[stock] = (date_dict, sorted_dates)
-            except:
+            except Exception:
                 pass
 
         self._prebuilt_index = True
@@ -122,28 +135,28 @@ class PtradeAPI:
                 self._stock_date_index[stock] = ({}, [])
         return self._stock_date_index.get(stock, ({}, []))
 
-    def get_adjusted_price(self, stock: str, date: str, price_type: str = 'close', fq: str = 'none') -> float:
+    def get_adjusted_price(self, stock: str, date: str, price_type: str = 'close', fq: str = None) -> float:
         """获取复权后的价格
 
         Args:
             stock: 股票代码
             date: 日期
             price_type: 价格类型 (close/open/high/low)
-            fq: 复权类型 ('none'-不复权, 'pre'-前复权, 'post'-后复权)
+            fq: 复权类型 (None-不复权, 'pre'-前复权, 'post'-后复权)
 
         Returns:
             复权后价格
         """
-        if fq == 'none' or stock not in self.data_context.stock_data_dict:
+        if fq is None or stock not in self.data_context.stock_data_dict:
             # 不复权，直接返回原始价格
             try:
                 stock_df = self.data_context.stock_data_dict[stock]
                 return stock_df.loc[date, price_type]
-            except:
+            except (KeyError, IndexError, AttributeError):
                 return np.nan
 
         if fq == 'pre':
-            # 前复权：仅使用adj_pre_cache
+            # 前复权：使用adj_pre_cache
             try:
                 stock_df = self.data_context.stock_data_dict[stock]
                 original_price = stock_df.loc[date, price_type]
@@ -155,19 +168,38 @@ class PtradeAPI:
                     if date_ts in adj_factors.index:
                         adj_a = adj_factors.loc[date_ts, 'adj_a']
                         adj_b = adj_factors.loc[date_ts, 'adj_b']
-                        # ptrade前复权公式: 前复权价 = 未复权价 * adj_a + adj_b
-                        return original_price * adj_a + adj_b
+                        # 前复权公式: 前复权价 = (未复权价 - adj_b) / adj_a
+                        return (original_price - adj_b) / adj_a
 
                 # 缓存不存在或无对应日期，返回原始价
                 return original_price
-            except:
+            except (KeyError, IndexError, AttributeError):
+                return np.nan
+
+        if fq == 'post':
+            # 后复权：使用adj_post_cache
+            try:
+                stock_df = self.data_context.stock_data_dict[stock]
+                original_price = stock_df.loc[date, price_type]
+
+                if self.data_context.adj_post_cache and stock in self.data_context.adj_post_cache:
+                    adj_factors = self.data_context.adj_post_cache[stock]
+                    date_ts = pd.Timestamp(date)
+                    if date_ts in adj_factors.index:
+                        adj_a = adj_factors.loc[date_ts, 'adj_a']
+                        adj_b = adj_factors.loc[date_ts, 'adj_b']
+                        # 后复权公式: 后复权价 = adj_a * 未复权价 + adj_b
+                        return adj_a * original_price + adj_b
+
+                return original_price
+            except (KeyError, IndexError, AttributeError):
                 return np.nan
 
         # 其他情况返回原始价
         try:
             stock_df = self.data_context.stock_data_dict[stock]
             return stock_df.loc[date, price_type]
-        except:
+        except (KeyError, IndexError, AttributeError):
             return np.nan
         
     # ==================== 基础API ====================
@@ -186,11 +218,22 @@ class PtradeAPI:
         if self.data_context.stock_metadata.empty:
             return list(self.data_context.stock_data_dict.keys())
 
-        listed = pd.to_datetime(self.data_context.stock_metadata['listed_date'], format='mixed') <= target_date
-        not_delisted = (
-            (self.data_context.stock_metadata['de_listed_date'] == '2900-01-01') |
-            (pd.to_datetime(self.data_context.stock_metadata['de_listed_date'], errors='coerce', format='mixed') > target_date)
-        )
+        # 使用预解析的 Timestamp 列（避免每次调用都解析日期字符串）
+        if self.data_context.listed_date_ts is not None:
+            listed = self.data_context.listed_date_ts <= target_date
+        else:
+            listed = pd.to_datetime(self.data_context.stock_metadata['listed_date'], format='mixed') <= target_date
+
+        if self.data_context.de_listed_date_ts is not None:
+            not_delisted = (
+                (self.data_context.stock_metadata['de_listed_date'] == '2900-01-01') |
+                (self.data_context.de_listed_date_ts > target_date)
+            )
+        else:
+            not_delisted = (
+                (self.data_context.stock_metadata['de_listed_date'] == '2900-01-01') |
+                (pd.to_datetime(self.data_context.stock_metadata['de_listed_date'], errors='coerce', format='mixed') > target_date)
+            )
 
         return self.data_context.stock_metadata[listed & not_delisted].index.tolist()
 
@@ -247,8 +290,14 @@ class PtradeAPI:
         """
         base_date = self.context.current_dt
 
-        trade_days_df = self.data_context.stock_data_store['/trade_days']
-        all_trade_days = trade_days_df.index
+        # 优先使用独立的交易日历数据
+        if hasattr(self.data_context, 'trade_days') and self.data_context.trade_days is not None:
+            all_trade_days = self.data_context.trade_days
+        elif '000300.SS' in self.data_context.benchmark_data:
+            # 回退：从 benchmark_data 获取
+            all_trade_days = self.data_context.benchmark_data['000300.SS'].index
+        else:
+            raise RuntimeError("交易日历数据未加载")
 
         if base_date in all_trade_days:
             base_idx = all_trade_days.get_loc(base_date)
@@ -369,6 +418,25 @@ class PtradeAPI:
 
         result_data = {}
 
+        # 对于valuation表的total_value/float_value，需要用查询日期的收盘价实时计算
+        need_realtime_total_value = (table == 'valuation' and 'total_value' in fields)
+        need_realtime_float_value = (table == 'valuation' and 'float_value' in fields)
+        need_realtime_market_cap = need_realtime_total_value or need_realtime_float_value
+
+        # 预先获取并缓存当天所有股票的收盘价
+        close_prices = {}
+        if need_realtime_market_cap:
+            price_cache_key = ('_close_prices', query_ts)
+            if price_cache_key in self._fundamentals_cache:
+                close_prices = self._fundamentals_cache[price_cache_key]
+            else:
+                for stock, stock_df in self.data_context.stock_data_dict.items():
+                    if isinstance(stock_df, pd.DataFrame) and not stock_df.empty:
+                        idx = stock_df.index.searchsorted(query_ts, side='right')
+                        if idx > 0:
+                            close_prices[stock] = stock_df.iloc[idx - 1]['close']
+                self._fundamentals_cache[price_cache_key] = close_prices
+
         for stock in stocks:
             if stock not in date_indices:
                 continue
@@ -384,7 +452,22 @@ class PtradeAPI:
 
                 stock_data = {}
                 for field in fields:
-                    stock_data[field] = row[field] if field in row else None
+                    if field == 'total_value' and need_realtime_total_value:
+                        # 实时计算总市值 = 查询日收盘价 × 总股本
+                        total_shares = row.get('total_shares')
+                        if total_shares is not None and not pd.isna(total_shares) and stock in close_prices:
+                            stock_data[field] = close_prices[stock] * total_shares
+                        else:
+                            stock_data[field] = row.get(field)
+                    elif field == 'float_value' and need_realtime_float_value:
+                        # 实时计算流通市值 = 查询日收盘价 × 流通股本
+                        a_floats = row.get('a_floats')
+                        if a_floats is not None and not pd.isna(a_floats) and stock in close_prices:
+                            stock_data[field] = close_prices[stock] * a_floats
+                        else:
+                            stock_data[field] = row.get(field)
+                    else:
+                        stock_data[field] = row.get(field)
 
                 if stock_data:
                     result_data[stock] = stock_data
@@ -436,6 +519,12 @@ class PtradeAPI:
 
     def get_price(self, security: str | list[str], start_date: str = None, end_date: str = None, frequency: str = '1d', fields: str | list[str] = None, fq: str = None, count: int = None) -> pd.DataFrame | PtradeAPI.PanelLike:
         """获取历史行情数据"""
+        # 验证fq参数
+        valid_fq = ['pre', 'post', 'dypre', None]
+        if fq not in valid_fq:
+            raise ValueError("function get_price: invalid fq argument, valid: {}, got {} (type: {})".format(
+                valid_fq, fq, type(fq)))
+
         if isinstance(fields, str):
             fields_list = [fields]
         elif fields is None:
@@ -459,11 +548,14 @@ class PtradeAPI:
 
                 try:
                     date_dict, _ = self.get_stock_date_index(stock)
-                    current_idx = date_dict.get(end_dt) or stock_df.index.get_loc(end_dt)
-                except:
+                    current_idx = date_dict.get(end_dt)
+                    if current_idx is None:
+                        current_idx = stock_df.index.get_loc(end_dt)
+                except (KeyError, IndexError):
                     continue
 
-                slice_df = stock_df.iloc[max(0, current_idx - count):current_idx]
+                # Ptrade API语义: count=N 返回截止到end_date的N天数据（包含end_date）
+                slice_df = stock_df.iloc[max(0, current_idx - count + 1):current_idx + 1]
                 result[stock] = slice_df
         else:
             start_dt = pd.Timestamp(start_date) if start_date else None
@@ -479,9 +571,9 @@ class PtradeAPI:
                     continue
 
                 if start_dt:
-                    mask = (stock_df.index >= start_dt) & (stock_df.index < end_dt)
+                    mask = (stock_df.index >= start_dt) & (stock_df.index <= end_dt)
                 else:
-                    mask = stock_df.index < end_dt
+                    mask = stock_df.index <= end_dt
 
                 slice_df = stock_df[mask]
                 result[stock] = slice_df
@@ -489,17 +581,45 @@ class PtradeAPI:
         if fq == 'pre':
             for stock in list(result.keys()):
                 stock_df = result[stock]
-                if isinstance(stock_df, pd.DataFrame):
-                    adjusted_df = stock_df.copy()
-                    price_cols = ['open', 'high', 'low', 'close']
-                    for col in price_cols:
-                        if col in adjusted_df.columns:
-                            for date_idx in adjusted_df.index:
-                                date_str = date_idx.strftime('%Y-%m-%d')
-                                adjusted_price = self.get_adjusted_price(stock, date_str, col, fq='pre')
-                                if not np.isnan(adjusted_price):
-                                    adjusted_df.loc[date_idx, col] = adjusted_price
-                    result[stock] = adjusted_df
+                if isinstance(stock_df, pd.DataFrame) and not stock_df.empty:
+                    # 向量化复权计算
+                    if self.data_context.adj_pre_cache and stock in self.data_context.adj_pre_cache:
+                        adj_factors = self.data_context.adj_pre_cache[stock]
+                        # 找到stock_df中有复权因子的日期
+                        common_idx = stock_df.index.intersection(adj_factors.index)
+                        if len(common_idx) > 0:
+                            adjusted_df = stock_df.copy()
+                            adj_a = adj_factors.loc[common_idx, 'adj_a']
+                            adj_b = adj_factors.loc[common_idx, 'adj_b']
+                            price_cols = ['open', 'high', 'low', 'close']
+                            for col in price_cols:
+                                if col in adjusted_df.columns:
+                                    # 前复权公式: 前复权价 = (未复权价 - adj_b) / adj_a
+                                    adjusted_df.loc[common_idx, col] = (
+                                        adjusted_df.loc[common_idx, col] - adj_b
+                                    ) / adj_a
+                            result[stock] = adjusted_df
+
+        if fq == 'post':
+            for stock in list(result.keys()):
+                stock_df = result[stock]
+                if isinstance(stock_df, pd.DataFrame) and not stock_df.empty:
+                    # 向量化复权计算
+                    if self.data_context.adj_post_cache and stock in self.data_context.adj_post_cache:
+                        adj_factors = self.data_context.adj_post_cache[stock]
+                        common_idx = stock_df.index.intersection(adj_factors.index)
+                        if len(common_idx) > 0:
+                            adjusted_df = stock_df.copy()
+                            adj_a = adj_factors.loc[common_idx, 'adj_a']
+                            adj_b = adj_factors.loc[common_idx, 'adj_b']
+                            price_cols = ['open', 'high', 'low', 'close']
+                            for col in price_cols:
+                                if col in adjusted_df.columns:
+                                    # 后复权公式: 后复权价 = adj_a * 未复权价 + adj_b
+                                    adjusted_df.loc[common_idx, col] = (
+                                        adj_a * adjusted_df.loc[common_idx, col] + adj_b
+                                    )
+                            result[stock] = adjusted_df
 
         if not result:
             return pd.DataFrame()
@@ -525,6 +645,12 @@ class PtradeAPI:
     @timer()
     def get_history(self, count: int, frequency: str = '1d', field: str | list[str] = 'close', security_list: str | list[str] = None, fq: str = None, include: bool = False, fill: str = 'nan', is_dict: bool = False) -> pd.DataFrame | dict | PtradeAPI.PanelLike:
         """模拟通用ptrade的get_history（优化批量处理+缓存）"""
+        # 验证fq参数
+        valid_fq = ['pre', 'post', 'dypre', None]
+        if fq not in valid_fq:
+            raise ValueError("function get_history: invalid fq argument, valid: {}, got {} (type: {})".format(
+                valid_fq, fq, type(fq)))
+
         if isinstance(field, str):
             fields = [field]
         else:
@@ -571,12 +697,13 @@ class PtradeAPI:
                 if current_idx is None:
                     current_idx = data_source.index.get_loc(current_dt)
                 stock_info[stock] = (data_source, current_idx)
-            except:
+            except (KeyError, IndexError):
                 continue
 
         # 优化3+4: 批量切片+复权（减少循环开销）
         result = {}
-        needs_adj = fq == 'pre' and self.data_context.adj_pre_cache
+        needs_adj_pre = fq == 'pre' and self.data_context.adj_pre_cache
+        needs_adj_post = fq == 'post' and self.data_context.adj_post_cache
         price_fields = {'open', 'high', 'low', 'close'}  # 预先构建集合,提升查找速度
 
         for stock, (data_source, current_idx) in stock_info.items():
@@ -596,9 +723,8 @@ class PtradeAPI:
             if len(slice_df) == 0:
                 continue
 
-            # 复权处理: ptrade前复权 = 未复权价 * adj_a + adj_b
-            # adj_pre_cache存储的是前复权因子DataFrame(columns=['adj_a', 'adj_b'])
-            if needs_adj and stock in self.data_context.adj_pre_cache:
+            # 前复权处理: 前复权价 = (未复权价 - adj_b) / adj_a
+            if needs_adj_pre and stock in self.data_context.adj_pre_cache:
                 adj_factors = self.data_context.adj_pre_cache[stock]
                 slice_adj = adj_factors.iloc[start_idx:end_idx]
 
@@ -610,8 +736,25 @@ class PtradeAPI:
                     if field_name not in slice_df.columns:
                         continue
                     if field_name in price_fields:
-                        # 前复权价 = 未复权价 * adj_a + adj_b
-                        stock_result[field_name] = slice_df[field_name].values * adj_a + adj_b
+                        # 前复权价 = (未复权价 - adj_b) / adj_a
+                        stock_result[field_name] = (slice_df[field_name].values - adj_b) / adj_a
+                    else:
+                        stock_result[field_name] = slice_df[field_name].values
+            # 后复权处理: 后复权价 = adj_a * 未复权价 + adj_b
+            elif needs_adj_post and stock in self.data_context.adj_post_cache:
+                adj_factors = self.data_context.adj_post_cache[stock]
+                slice_adj = adj_factors.iloc[start_idx:end_idx]
+
+                adj_a = slice_adj['adj_a'].values
+                adj_b = slice_adj['adj_b'].values
+
+                stock_result = {}
+                for field_name in fields:
+                    if field_name not in slice_df.columns:
+                        continue
+                    if field_name in price_fields:
+                        # 后复权价 = adj_a * 未复权价 + adj_b
+                        stock_result[field_name] = adj_a * slice_df[field_name].values + adj_b
                     else:
                         stock_result[field_name] = slice_df[field_name].values
             else:
@@ -650,12 +793,7 @@ class PtradeAPI:
                     df_data = {stock: result[stock][field_name] for stock in stocks_list if stock in result and field_name in result[stock]}
                     panel_data[field_name] = pd.DataFrame(df_data)
 
-                class _PanelLike(dict):
-                    @property
-                    def empty(self) -> bool:
-                        return not self or all(df.empty for df in self.values())
-
-                final_result = _PanelLike(panel_data)
+                final_result = self.PanelLike(panel_data)
 
         # 缓存结果 (LRUCache自动管理大小)
         self._history_cache[cache_key] = final_result
@@ -671,7 +809,7 @@ class PtradeAPI:
                 blocks_str = self.data_context.stock_metadata.loc[stock, 'blocks']
                 if pd.notna(blocks_str) and blocks_str:
                     return json.loads(blocks_str)
-            except:
+            except (KeyError, json.JSONDecodeError):
                 pass
         return {}
 
@@ -740,23 +878,7 @@ class PtradeAPI:
 
             is_problematic = False
 
-            # HALT状态优先使用实时volume判定，避免使用过期快照数据
-            if query_type == 'HALT' and stock in self.data_context.stock_data_dict:
-                stock_df = self.data_context.stock_data_dict[stock]
-                if isinstance(stock_df, pd.DataFrame):
-                    try:
-                        valid_dates = stock_df.index[stock_df.index <= query_dt]
-                        if len(valid_dates) > 0:
-                            nearest_date = valid_dates[-1]
-                            volume = stock_df.loc[nearest_date, 'volume']
-                            is_problematic = (volume == 0 or pd.isna(volume))
-                            self._stock_status_cache[cache_key] = is_problematic
-                            result[stock] = is_problematic
-                            continue
-                    except:
-                        pass
-
-            # ST和DELISTING使用快照数据优先
+            # 统一使用快照数据判定 ST/HALT/DELISTING
             if self.data_context.stock_status_history:
                 # 缓存排序后的日期列表（只排序一次）
                 if self._sorted_status_dates is None:
@@ -784,7 +906,7 @@ class PtradeAPI:
                 try:
                     de_listed_date = pd.Timestamp(self.data_context.stock_metadata.loc[stock, 'de_listed_date'])
                     is_problematic = (de_listed_date.year < 2900 and de_listed_date <= query_dt)
-                except:
+                except (KeyError, ValueError):
                     pass
 
             self._stock_status_cache[cache_key] = is_problematic
@@ -834,7 +956,8 @@ class PtradeAPI:
             for i in range(idx - 1, -1, -1):
                 nearest_date = available_dates[i]
                 if index_code in self.data_context.index_constituents[nearest_date]:
-                    return self.data_context.index_constituents[nearest_date][index_code]
+                    result = self.data_context.index_constituents[nearest_date][index_code]
+                    return list(result) if hasattr(result, '__iter__') else []
         
         return []
 
@@ -857,7 +980,7 @@ class PtradeAPI:
                             'stocks': []
                         }
                     industries[ind_code]['stocks'].append(stock_code)
-            except:
+            except (KeyError, json.JSONDecodeError, IndexError, TypeError):
                 pass
 
         if industry_code is None:
@@ -905,7 +1028,9 @@ class PtradeAPI:
 
             try:
                 date_dict, _ = self.get_stock_date_index(stock)
-                idx = date_dict.get(query_dt) or stock_df.index.get_loc(query_dt)
+                idx = date_dict.get(query_dt)
+                if idx is None:
+                    idx = stock_df.index.get_loc(query_dt)
 
                 if idx == 0:
                     result[stock] = status
@@ -948,7 +1073,7 @@ class PtradeAPI:
                     status = -1
 
                 result[stock] = status
-            except:
+            except (KeyError, IndexError, ValueError):
                 result[stock] = 0
 
         return result
@@ -999,34 +1124,27 @@ class PtradeAPI:
         if delta == 0:
             return None
 
-        # 使用OrderProcessor处理订单
-        if not hasattr(self, '_order_processor'):
-            self._order_processor = OrderProcessor(
-                self.context, self.data_context,
-                self.get_stock_date_index, self.log
-            )
-
         # 获取执行价格（根据买卖方向计算滑点）
         is_buy = delta > 0
-        execution_price = self._order_processor.get_execution_price(security, limit_price, is_buy)
+        execution_price = self.order_processor.get_execution_price(security, limit_price, is_buy)
         if execution_price is None:
             self.log.warning("订单失败 {} | 原因: 无法获取价格".format(security))
             return None
 
         # 检查涨跌停
         limit_status = self.check_limit(security, self.context.current_dt)[security]
-        if not self._order_processor.check_limit_status(security, delta, limit_status):
+        if not self.order_processor.check_limit_status(security, delta, limit_status):
             return None
 
         # 创建订单
-        order_id, order = self._order_processor.create_order(security, delta, execution_price)
+        order_id, order = self.order_processor.create_order(security, delta, execution_price)
 
         if delta > 0:
             self.log.info("生成订单，订单号:{}，股票代码：{}，数量：买入{}股".format(order_id, security, delta))
-            success = self._order_processor.execute_buy(security, delta, execution_price)
+            success = self.order_processor.execute_buy(security, delta, execution_price)
         else:
             self.log.info("生成订单，订单号:{}，股票代码：{}，数量：卖出{}股".format(order_id, security, abs(delta)))
-            success = self._order_processor.execute_sell(security, abs(delta), execution_price)
+            success = self.order_processor.execute_sell(security, abs(delta), execution_price)
 
         if success:
             order.status = '8'
@@ -1046,15 +1164,8 @@ class PtradeAPI:
         Returns:
             订单id或None
         """
-        # 使用OrderProcessor处理订单
-        if not hasattr(self, '_order_processor'):
-            self._order_processor = OrderProcessor(
-                self.context, self.data_context,
-                self.get_stock_date_index, self.log
-            )
-
         # 获取执行价格
-        current_price = self._order_processor.get_execution_price(security, limit_price)
+        current_price = self.order_processor.get_execution_price(security, limit_price)
         if current_price is None:
             self.log.warning(f"【下单失败】{security} | 原因: 获取价格数据失败")
             return None
@@ -1076,7 +1187,7 @@ class PtradeAPI:
         if target_amount >= min_lot:
             # 检查现金是否足够（含手续费）
             cost = target_amount * current_price
-            commission = self._order_processor.calculate_commission(target_amount, current_price, is_sell=False)
+            commission = self.order_processor.calculate_commission(target_amount, current_price, is_sell=False)
             total_cost = cost + commission
 
             if total_cost <= available_cash:
@@ -1089,7 +1200,7 @@ class PtradeAPI:
                 # 迭代调整，确保包含手续费后不超预算
                 while max_affordable_amount >= min_lot:
                     test_cost = max_affordable_amount * current_price
-                    test_commission = self._order_processor.calculate_commission(max_affordable_amount, current_price, is_sell=False)
+                    test_commission = self.order_processor.calculate_commission(max_affordable_amount, current_price, is_sell=False)
                     test_total = test_cost + test_commission
 
                     if test_total <= available_cash:
@@ -1110,12 +1221,12 @@ class PtradeAPI:
             return None
 
         # 创建订单
-        order_id, order = self._order_processor.create_order(security, amount, current_price)
+        order_id, order = self.order_processor.create_order(security, amount, current_price)
 
         self.log.info("生成订单，订单号:{}，股票代码：{}，数量：买入{}股".format(order_id, security, amount))
 
         # 执行订单
-        success = self._order_processor.execute_buy(security, amount, current_price)
+        success = self.order_processor.execute_buy(security, amount, current_price)
 
         if success:
             order.status = '8'
